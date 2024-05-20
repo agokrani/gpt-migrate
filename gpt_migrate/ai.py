@@ -8,7 +8,7 @@ from litellm import completion
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 class AI:
-    def __init__(self, model='openrouter/openai/gpt-4-32k', temperature=0.1, max_tokens=10000):
+    def __init__(self, model='openrouter/openai/gpt-4-32k', temperature=0.1, max_tokens=4096):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.model_name = model
@@ -45,7 +45,7 @@ class AI:
         chat = ""
         for chunk in response:
             delta = chunk["choices"][0]["delta"]
-            msg = delta.get("content", "")
+            msg = delta.get("content", "") if delta.get("content") is not None else ""
             chat += msg
         return chat
     
