@@ -1,9 +1,22 @@
-from utils import prompt_constructor, llm_write_file, llm_run, build_directory_structure, copy_files, write_to_memory, read_from_memory, file_exists_in_memory, convert_sigs_to_string
-from config import HIERARCHY, GUIDELINES, WRITE_CODE, GET_EXTERNAL_DEPS, GET_INTERNAL_DEPS, ADD_DOCKER_REQUIREMENTS, REFINE_DOCKERFILE, WRITE_MIGRATION, SINGLEFILE, EXCLUDED_FILES, GET_FUNCTION_SIGNATURES
-from typing import List
 import os
 import json
 import typer
+from pydantic import BaseModel
+from yaspin import yaspin
+from utils import prompt_constructor, llm_write_file, llm_run, build_directory_structure, copy_files, write_to_memory, read_from_memory, file_exists_in_memory, convert_sigs_to_string
+from config import HIERARCHY, GUIDELINES, WRITE_CODE, GET_EXTERNAL_DEPS, GET_INTERNAL_DEPS, ADD_DOCKER_REQUIREMENTS, REFINE_DOCKERFILE, WRITE_MIGRATION, SINGLEFILE, EXCLUDED_FILES, GET_FUNCTION_SIGNATURES
+from typing import List
+from agents.common.prompts import BACKSTORY, ROLE
+from agents.migration_agent.prompts import GOAL as MIGRATION_GOAL
+from agents.external_dependency_agent.prompts import GOAL as EXTERNAL_DEPS_GOAL
+from tasks.migration.prompts import DESCRIPTION as MIGRATION_TASK_DESCRIPTION, OUTPUT_FORMAT as MIGRATION_TASK_OUTPUT_FORMAT
+from tasks.external_dependency.prompts import DESCRIPTION as EXTERNAL_DEPS_TASK_DESCRIPTION, OUTPUT_FORMAT as EXTERNAL_DEPS_TASK_OUTPUT_FORMAT
+from utils import agent_constructor, task_constructor, crew_constructor, write_code
+
+class MigratedSource(BaseModel):
+    file_name: str
+    language: str
+    code: str
 
 def get_function_signatures(targetfiles: List[str], globals): 
     '''  Get the function signatures and a one-sentence summary for each function '''    
@@ -34,7 +47,6 @@ def get_function_signatures(targetfiles: List[str], globals):
                                     globals=globals))
             
             all_sigs.extend(sigs)
-
             with open(os.path.join('memory', sigs_file_name), 'w') as f:
                 json.dump(sigs, f)
 
@@ -43,26 +55,46 @@ def get_function_signatures(targetfiles: List[str], globals):
 def get_dependencies(sourcefile, globals):
 
     ''' Get external and internal dependencies of source file '''
-
-    external_deps_prompt_template = prompt_constructor(HIERARCHY, GUIDELINES, GET_EXTERNAL_DEPS)
+    external_dependencies_agent = agent_constructor(role=ROLE, goal=EXTERNAL_DEPS_GOAL, backstory=BACKSTORY, verbose=True)
+    
+    external_dependencies_task = task_constructor(
+        description=EXTERNAL_DEPS_TASK_DESCRIPTION, 
+        expected_output=EXTERNAL_DEPS_TASK_OUTPUT_FORMAT, 
+        agent=external_dependencies_agent
+    )
+    
+    external_dependency_crew = crew_constructor(
+        agents=[external_dependencies_agent], 
+        tasks=[external_dependencies_task], 
+        verbose=True
+    )
+    
+    #external_deps_prompt_template = prompt_constructor(HIERARCHY, GUIDELINES, GET_EXTERNAL_DEPS)
     internal_deps_prompt_template = prompt_constructor(HIERARCHY, GUIDELINES, GET_INTERNAL_DEPS)
 
     sourcefile_content = ""
     with open(os.path.join(globals.sourcedir, sourcefile), 'r') as file:
         sourcefile_content = file.read()
     
-    prompt = external_deps_prompt_template.format(targetlang=globals.targetlang, 
-                                                    sourcelang=globals.sourcelang, 
-                                                    sourcefile_content=sourcefile_content)
+    # prompt = external_deps_prompt_template.format(targetlang=globals.targetlang, 
+    #                                                 sourcelang=globals.sourcelang, 
+    #                                                 sourcefile_content=sourcefile_content)
 
-    external_dependencies = llm_run(prompt,
-                            waiting_message=f"Identifying external dependencies for {sourcefile}...",
-                            success_message=None,
-                            globals=globals)
+    # external_dependencies = llm_run(prompt,
+    #                         waiting_message=f"Identifying external dependencies for {sourcefile}...",
+    #                         success_message=None,
+    #                         globals=globals)
+    
+    with yaspin(text=f"Identifying external dependencies for {sourcefile}...", spinner="dots") as spinner:
+        external_dependencies = external_dependency_crew.kickoff({
+            "targetlang": globals.targetlang, 
+            "sourcelang": globals.sourcelang, 
+            "sourcefile_content": sourcefile_content
+        })
+        spinner.ok("✅ ")
     
     external_deps_list = external_dependencies.split(',') if external_dependencies != "NONE" else []
     write_to_memory("external_dependencies",external_deps_list)
-
     prompt = internal_deps_prompt_template.format(targetlang=globals.targetlang,
                                                     sourcelang=globals.sourcelang,
                                                     sourcefile=sourcefile,
@@ -89,28 +121,70 @@ def write_migration(sourcefile, external_deps_list, deps_per_file, globals) -> s
 
     sigs = get_function_signatures(deps_per_file, globals) if deps_per_file else []
     
-    write_migration_template = prompt_constructor(HIERARCHY, GUIDELINES, WRITE_CODE, WRITE_MIGRATION, SINGLEFILE)
+    # write_migration_template = prompt_constructor(HIERARCHY, GUIDELINES, WRITE_CODE, WRITE_MIGRATION, SINGLEFILE)
 
     sourcefile_content = ""
     with open(os.path.join(globals.sourcedir, sourcefile), 'r') as file:
         sourcefile_content = file.read()
     
-    prompt = write_migration_template.format(targetlang=globals.targetlang,
-                                                targetlang_function_signatures=convert_sigs_to_string(sigs),
-                                                sourcelang=globals.sourcelang,
-                                                sourcefile=sourcefile,
-                                                sourcefile_content=sourcefile_content,
-                                                external_deps=','.join(external_deps_list),
-                                                source_directory_structure=globals.source_directory_structure,
-                                                target_directory_structure=build_directory_structure(globals.targetdir),
-                                                guidelines=globals.guidelines)
+    target_directory_structure = build_directory_structure(globals.targetdir)
+    typer.echo(typer.style("target directory structure: \n\n" + target_directory_structure, fg=typer.colors.BLUE))
     
-    return llm_write_file(prompt,
-                    target_path=None,
-                    waiting_message=f"Creating migration file for {sourcefile}...",
-                    success_message=None,
-                    globals=globals)[0]
+    # prompt = write_migration_template.format(targetlang=globals.targetlang,
+    #                                             targetlang_function_signatures=convert_sigs_to_string(sigs),
+    #                                             sourcelang=globals.sourcelang,
+    #                                             sourcefile=sourcefile,
+    #                                             sourcefile_content=sourcefile_content,
+    #                                             external_deps=','.join(external_deps_list),
+    #                                             source_directory_structure=globals.source_directory_structure,
+    #                                             target_directory_structure=target_directory_structure,
+    #                                             guidelines=globals.guidelines)
     
+    # return llm_write_file(prompt,
+    #                 target_path=None,
+    #                 waiting_message=f"Creating migration file for {sourcefile}...",
+    #                 success_message=None,
+    #                 globals=globals)[0]
+
+    # testing agent constructions
+    migration_agent = agent_constructor(role=ROLE, goal=MIGRATION_GOAL, backstory=BACKSTORY, verbose=True)
+    
+    migration_task = task_constructor(
+        description=MIGRATION_TASK_DESCRIPTION, 
+        expected_output=MIGRATION_TASK_OUTPUT_FORMAT, 
+        agent=migration_agent, 
+        output_json=MigratedSource
+    )
+    
+    migration_crew = crew_constructor(agents=[migration_agent], tasks=[migration_task], verbose=True)
+    
+    with yaspin(text=f"Creating migration file for {sourcefile}...", spinner="dots") as spinner:
+        response = migration_crew.kickoff({
+            "targetlang": globals.targetlang, 
+            "targetlang_function_signatures": convert_sigs_to_string(sigs),
+            "sourcelang": globals.sourcelang, 
+            "sourcefile": sourcefile, 
+            "sourcefile_content": sourcefile_content, 
+            "external_deps": ','.join(external_deps_list), 
+            "source_directory_structure": globals.source_directory_structure, 
+            "target_directory_structure": target_directory_structure
+        })
+        
+        response = json.loads(response) 
+        spinner.ok("✅ ")
+    
+    # write migrated source code to the file
+    write_code(
+        MigratedSource(
+            file_name=response["file_name"], 
+            language=response["language"], 
+            code=response["code"]
+        ), 
+        globals=globals
+    )
+    
+    return response["file_name"]
+
 def add_env_files(globals):
 
     ''' Copy all files recursively with included extensions from the source directory to the target directory in the same relative structure '''

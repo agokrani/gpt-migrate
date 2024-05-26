@@ -7,6 +7,7 @@ import fnmatch
 import re
 import shutil
 from config import INCLUDED_EXTENSIONS, EXTENSION_TO_LANGUAGE
+from crewai import Agent, Task, Crew
 
 def detect_language(source_directory):
 
@@ -32,6 +33,25 @@ def prompt_constructor(*args):
             prompt += file.read().strip()
     return prompt
 
+def agent_constructor(role, goal, backstory, **kwargs):
+    return Agent(
+        role=role,
+        goal=goal,
+        backstory=backstory,
+        **kwargs
+    )
+
+def task_constructor(description, expected_output, agent, **kwargs): 
+    return Task(
+        description=description, 
+        expected_output=expected_output,
+        agent=agent,
+        **kwargs
+    )
+
+def crew_constructor(agents, tasks, **kwargs):
+    return Crew(agents=agents, tasks=tasks, **kwargs)
+
 def llm_run(prompt,waiting_message,success_message,globals):
     
     output = ""
@@ -45,6 +65,22 @@ def llm_run(prompt,waiting_message,success_message,globals):
     
     return output
 
+def write_code(migrated_source, globals, success_message=None): 
+    # Create the file in the target directory
+    if "/" in migrated_source.file_name:
+        path = os.path.join(globals.targetdir, os.path.dirname(migrated_source.file_name))
+        os.makedirs(path, exist_ok=True)
+    
+    with open(os.path.join(globals.targetdir, migrated_source.file_name), 'w') as file:
+        file.write(migrated_source.code)
+    
+    if success_message:
+        success_text = typer.style(success_message, fg=typer.colors.GREEN)
+        typer.echo(success_text)
+    else:
+        success_text = typer.style(f"Created {migrated_source.file_name} at {globals.targetdir}", fg=typer.colors.GREEN)
+        typer.echo(success_text)
+
 def llm_write_file(prompt,target_path,waiting_message,success_message,globals):
     
     file_content = ""
@@ -54,7 +90,6 @@ def llm_write_file(prompt,target_path,waiting_message,success_message,globals):
     
     if file_name=="INSTRUCTIONS:":
         return "INSTRUCTIONS:","",file_content
-
     if target_path:
         with open(os.path.join(globals.targetdir, target_path), 'w') as file:
             file.write(file_content)

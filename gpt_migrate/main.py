@@ -13,6 +13,8 @@ from steps.debug import debug_testfile, debug_error
 
 app = typer.Typer()
 
+os.environ["OPENAI_MODEL_NAME"] = 'gpt-4o'
+
 class Globals:
     def __init__(self, sourcedir, targetdir, sourcelang, targetlang, sourceentry, source_directory_structure, operating_system, testfiles, sourceport, targetport, guidelines, ai):
         self.sourcedir = sourcedir
